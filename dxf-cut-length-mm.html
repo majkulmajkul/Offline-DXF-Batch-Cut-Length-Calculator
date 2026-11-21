@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Offline DXF Batch Cut-Length Calculator (mm)</title>
+<style>
+  :root {
+    --bg: #f8fafc; --card: #ffffff; --text: #0f172a; --muted: #64748b;
+    --primary: #2563eb; --primary-hover: #1d4ed8; --border: #e2e8f0;
+    --warn: #b45309; --warn-bg: #fef3c7; --info: #0369a1; --info-bg: #e0f2fe;
+  }
+  * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
+  body { background: var(--bg); color: var(--text); margin: 0; padding: 2rem; }
+  .container { max-width: 1200px; margin: 0 auto; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  h1 { margin: 0 0 0.5rem 0; font-size: 1.5rem; }
+  p { margin: 0 0 1.25rem 0; color: var(--muted); font-size: 0.95rem; }
+  .controls { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; }
+  .btn {
+    background: var(--primary); color: white; border: none; padding: 0.65rem 1.2rem;
+    border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 0.9rem;
+    display: inline-flex; align-items: center; gap: 0.5rem;
+  }
+  .btn:hover { background: var(--primary-hover); }
+  .btn:disabled { background: #94a3b8; cursor: not-allowed; }
+  .btn-secondary { background: #0f172a; }
+  .btn-secondary:hover { background: #334155; }
+  input[type="file"] { display: none; }
+  label.checkbox, label.select-group { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; cursor: pointer; }
+  select {
+    padding: 0.4rem 0.6rem; border-radius: 6px; border: 1px solid var(--border);
+    background: white; font-size: 0.9rem; color: var(--text);
+  }
+  table { width: 100%; border-collapse: collapse; margin-top: 1rem; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); }
+  th { background: #f1f5f9; font-weight: 600; color: var(--muted); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr:hover { background: #f8fafc; }
+  .badge-warn {
+    background: var(--warn-bg); color: var(--warn); padding: 0.2rem 0.5rem;
+    border-radius: 4px; font-size: 0.8rem; font-weight: 600;
+  }
+  .badge-info {
+    background: var(--info-bg); color: var(--info); padding: 0.2rem 0.5rem;
+    border-radius: 4px; font-size: 0.8rem; font-weight: 600;
+  }
+  .summary {
+    display: flex; flex-wrap: wrap; gap: 2rem; padding: 1rem; background: #f1f5f9;
+    border-radius: 6px; margin-bottom: 1rem; font-weight: 600;
+  }
+  .summary span { color: var(--primary); }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <div class="card">
+    <h1>Offline DXF Batch Cut-Length Calculator</h1>
+    <p>Select a folder containing DXF files. Automatically converts detected drawing units to millimeters (mm) locally in your browser.</p>
+    
+    <div class="controls">
+      <label class="btn">
+        Select Folder
+        <input type="file" id="folderInput" webkitdirectory directory multiple>
+      </label>
+      <button id="exportBtn" class="btn btn-secondary" disabled>Download CSV</button>
+      <label class="checkbox">
+        <input type="checkbox" id="ignorePaperSpace" checked>
+        Ignore Paper Space
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" id="includeSubfolders" checked>
+        Include subfolders
+      </label>
+      <label class="select-group">
+        Unitless files assume:
+        <select id="unitlessFallback">
+          <option value="1" selected>mm (1:1)</option>
+          <option value="25.4">Inches (x 25.4)</option>
+          <option value="10">cm (x 10)</option>
+          <option value="1000">Meters (x 1000)</option>
+        </select>
+      </label>
+    </div>
+  </div>
+
+  <div class="card" id="resultsCard" style="display:none;">
+    <div class="summary" id="summaryBar"></div>
+    <div style="overflow-x:auto;">
+      <table id="resultsTable">
+        <thead>
+          <tr>
+            <th>File Path</th>
+            <th>Detected Units</th>
+            <th class="num">Entities</th>
+            <th class="num">Native Length</th>
+            <th class="num">Cut Length (mm)</th>
+            <th>Notes / Warnings</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const INSUNITS_DATA = {
+  0:  { name: 'Unitless',    toMm: null },
+  1:  { name: 'Inches',      toMm: 25.4 },
+  2:  { name: 'Feet',        toMm: 304.8 },
+  3:  { name: 'Miles',       toMm: 1609344 },
+  4:  { name: 'mm',          toMm: 1 },
+  5:  { name: 'cm',          toMm: 10 },
+  6:  { name: 'm',           toMm: 1000 },
+  7:  { name: 'km',          toMm: 1000000 },
+  8:  { name: 'Microinches', toMm: 0.0000254 },
+  9:  { name: 'Mils',        toMm: 0.0254 },
+  10: { name: 'Yards',       toMm: 914.4 },
+  11: { name: 'Angstroms',   toMm: 1e-7 },
+  12: { name: 'Nanometers',  toMm: 1e-6 },
+  13: { name: 'Microns',     toMm: 0.001 },
+  14: { name: 'Decimeters',  toMm: 100 }
+};
+
+let cachedFiles = [];
+let lastResults = [];
+
+document.getElementById('folderInput').addEventListener('change', (e) => {
+  cachedFiles = Array.from(e.target.files);
+  processCachedFiles();
+});
+
+document.getElementById('ignorePaperSpace').addEventListener('change', () => {
+  if (cachedFiles.length) processCachedFiles();
+});
+document.getElementById('includeSubfolders').addEventListener('change', () => {
+  if (cachedFiles.length) processCachedFiles();
+});
+document.getElementById('unitlessFallback').addEventListener('change', () => {
+  if (cachedFiles.length) processCachedFiles();
+});
+document.getElementById('exportBtn').addEventListener('click', downloadCSV);
+
+async function processCachedFiles() {
+  const includeSub = document.getElementById('includeSubfolders').checked;
+  const ignorePS = document.getElementById('ignorePaperSpace').checked;
+  const fallbackFactor = parseFloat(document.getElementById('unitlessFallback').value);
+  const fallbackLabel = document.getElementById('unitlessFallback').selectedOptions[0].text;
+
+  const dxfFiles = cachedFiles.filter(f => {
+    if (!f.name.toLowerCase().endsWith('.dxf')) return false;
+    if (!includeSub && f.webkitRelativePath.split('/').length > 2) return false;
+    return true;
+  });
+
+  if (dxfFiles.length === 0) {
+    alert('No .dxf files found in the selected folder.');
+    return;
+  }
+
+  lastResults = [];
+  const tbody = document.querySelector('#resultsTable tbody');
+  tbody.innerHTML = '<tr><td colspan="6">Processing ' + dxfFiles.length + ' files...</td></tr>';
+  document.getElementById('resultsCard').style.display = 'block';
+
+  let grandTotalMm = 0;
+
+  for (const file of dxfFiles) {
+    const text = await file.text();
+    const res = parseAndCalculateDXF(text, ignorePS, fallbackFactor, fallbackLabel);
+    res.fileName = file.webkitRelativePath || file.name;
+    lastResults.push(res);
+    grandTotalMm += res.lengthMm;
+  }
+
+  renderResults(lastResults, grandTotalMm);
+  document.getElementById('exportBtn').disabled = false;
+}
+
+function renderResults(results, grandTotalMm) {
+  const tbody = document.querySelector('#resultsTable tbody');
+  tbody.innerHTML = '';
+
+  results.sort((a, b) => a.fileName.localeCompare(b.fileName));
+
+  for (const r of results) {
+    const tr = document.createElement('tr');
+    const notes = [];
+    if (r.infoNote) notes.push(`<span class="badge-info">${escapeHtml(r.infoNote)}</span>`);
+    if (r.warnings.length) notes.push(`<span class="badge-warn">${escapeHtml(r.warnings.join(', '))}</span>`);
+    const noteHtml = notes.length ? notes.join(' ') : 'OK';
+
+    tr.innerHTML = `
+      <td>${escapeHtml(r.fileName)}</td>
+      <td>${escapeHtml(r.units)}</td>
+      <td class="num">${r.entityCount}</td>
+      <td class="num">${r.nativeLength.toFixed(4)}</td>
+      <td class="num"><strong>${r.lengthMm.toFixed(4)} mm</strong></td>
+      <td>${noteHtml}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+
+  document.getElementById('summaryBar').innerHTML = `
+    <div>Files Processed: <span>${results.length}</span></div>
+    <div>Combined Total Cut Length: <span>${grandTotalMm.toFixed(4)} mm</span> (${(grandTotalMm / 1000).toFixed(4)} m)</div>
+  `;
+}
+
+function downloadCSV() {
+  if (!lastResults.length) return;
+  const headers = ['File Path', 'Detected Units', 'Entity Count', 'Native Length', 'Cut Length (mm)', 'Notes'];
+  const rows = lastResults.map(r => {
+    const allNotes = [r.infoNote, ...r.warnings].filter(Boolean).join('; ');
+    return [
+      `"${r.fileName.replace(/"/g, '""')}"`,
+      `"${r.units}"`,
+      r.entityCount,
+      r.nativeLength.toFixed(6),
+      r.lengthMm.toFixed(6),
+      `"${allNotes}"`
+    ];
+  });
+
+  const csvContent = [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `dxf-cut-lengths-mm-${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function escapeHtml(str) {
+  return str.replace(/[&<>"']/g, m => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
+}
+
+function parseAndCalculateDXF(text, ignorePaperSpace, fallbackFactor, fallbackLabel) {
+  if (text.startsWith('AutoCAD Binary DXF')) {
+    return {
+      nativeLength: 0, lengthMm: 0, entityCount: 0,
+      units: 'Unknown', infoNote: '',
+      warnings: ['Binary DXF unsupported (save as ASCII DXF)']
+    };
+  }
+
+  const lines = text.split(/\r?\n/);
+  const pairs = [];
+  for (let i = 0; i < lines.length - 1; i += 2) {
+    const code = parseInt(lines[i].trim(), 10);
+    const val = lines[i + 1].trim();
+    if (!isNaN(code)) pairs.push({ code, val });
+  }
+
+  let unitCode = 0;
+  let measurementMetric = null; // $MEASUREMENT: 0 = English/Imperial, 1 = Metric
+  const blocks = {};
+  const entities = [];
+  const warnings = new Set();
+
+  let section = '';
+  let i = 0;
+
+  while (i < pairs.length) {
+    const p = pairs[i];
+    if (p.code === 0 && p.val === 'SECTION') {
+      i++;
+      if (i < pairs.length && pairs[i].code === 2) {
+        section = pairs[i].val;
+      }
+      i++;
+      continue;
+    }
+    if (p.code === 0 && p.val === 'ENDSEC') {
+      section = '';
+      i++;
+      continue;
+    }
+
+    if (section === 'HEADER') {
+      if (p.code === 9 && p.val === '$INSUNITS') {
+        i++;
+        if (i < pairs.length && pairs[i].code === 70) {
+          unitCode = parseInt(pairs[i].val, 10);
+        }
+      } else if (p.code === 9 && p.val === '$MEASUREMENT') {
+        i++;
+        if (i < pairs.length && pairs[i].code === 70) {
+          measurementMetric = parseInt(pairs[i].val, 10);
+        }
+      }
+      i++;
+    } else if (section === 'BLOCKS') {
+      if (p.code === 0 && p.val === 'BLOCK') {
+        const blockRes = parseBlock(pairs, i + 1);
+        if (blockRes.name) blocks[blockRes.name] = blockRes.entities;
+        i = blockRes.nextIndex;
+      } else {
+        i++;
+      }
+    } else if (section === 'ENTITIES') {
+      if (p.code === 0) {
+        const entRes = parseEntity(pairs, i);
+        if (entRes.entity) entities.push(entRes.entity);
+        i = entRes.nextIndex;
+      } else {
+        i++;
+      }
+    } else {
+      i++;
+    }
+  }
+
+  const stats = { count: 0, warnings };
+  const nativeLength = computeEntitiesLength(entities, blocks, { sx: 1, sy: 1, sz: 1, rot: 0 }, ignorePaperSpace, stats);
+
+  const unitInfo = INSUNITS_DATA[unitCode] || { name: 'Unitless', toMm: null };
+  let multiplier = unitInfo.toMm;
+  let infoNote = '';
+
+  if (multiplier === null) {
+    multiplier = fallbackFactor;
+    infoNote = `Unitless -> assumed ${fallbackLabel}`;
+    if (measurementMetric === 0 && fallbackFactor === 1) {
+      warnings.add('Header $MEASUREMENT is Imperial (check units)');
+    }
+  } else if (multiplier !== 1) {
+    infoNote = `Converted from ${unitInfo.name}`;
+  }
+
+  return {
+    nativeLength,
+    lengthMm: nativeLength * multiplier,
+    entityCount: stats.count,
+    units: unitInfo.name,
+    infoNote,
+    warnings: Array.from(warnings)
+  };
+}
+
+function parseBlock(pairs, idx) {
+  let name = '';
+  const entities = [];
+  let i = idx;
+
+  while (i < pairs.length) {
+    const p = pairs[i];
+    if (p.code === 0 && p.val === 'ENDBLK') {
+      i++;
+      while (i < pairs.length && pairs[i].code !== 0) i++;
+      return { name, entities, nextIndex: i };
+    }
+    if (p.code === 2 && !name && entities.length === 0) {
+      name = p.val;
+      i++;
+    } else if (p.code === 0) {
+      const entRes = parseEntity(pairs, i);
+      if (entRes.entity) entities.push(entRes.entity);
+      i = entRes.nextIndex;
+    } else {
+      i++;
+    }
+  }
+  return { name, entities, nextIndex: i };
+}
+
+function parseEntity(pairs, idx) {
+  const type = pairs[idx].val;
+  let i = idx + 1;
+  const ent = { type, paperSpace: 0 };
+
+  if (type === 'LWPOLYLINE') {
+    ent.vertices = [];
+    ent.closed = false;
+    let curV = null;
+    while (i < pairs.length && pairs[i].code !== 0) {
+      const { code, val } = pairs[i];
+      if (code === 67) ent.paperSpace = parseInt(val, 10);
+      else if (code === 70) ent.closed = (parseInt(val, 10) & 1) === 1;
+      else if (code === 10) {
+        if (curV) ent.vertices.push(curV);
+        curV = { x: parseFloat(val), y: 0, bulge: 0 };
+      } else if (code === 20 && curV) curV.y = parseFloat(val);
+      else if (code === 42 && curV) curV.bulge = parseFloat(val);
+      i++;
+    }
+    if (curV) ent.vertices.push(curV);
+    return { entity: ent, nextIndex: i };
+  }
+
+  if (type === 'POLYLINE') {
+    ent.vertices = [];
+    ent.closed = false;
+    while (i < pairs.length && pairs[i].code !== 0) {
+      const { code, val } = pairs[i];
+      if (code === 67) ent.paperSpace = parseInt(val, 10);
+      else if (code === 70) ent.closed = (parseInt(val, 10) & 1) === 1;
+      i++;
+    }
+    while (i < pairs.length) {
+      if (pairs[i].code === 0 && pairs[i].val === 'SEQEND') {
+        i++;
+        while (i < pairs.length && pairs[i].code !== 0) i++;
+        break;
+      }
+      if (pairs[i].code === 0 && pairs[i].val === 'VERTEX') {
+        i++;
+        const v = { x: 0, y: 0, z: 0, bulge: 0 };
+        while (i < pairs.length && pairs[i].code !== 0) {
+          const { code, val } = pairs[i];
+          if (code === 10) v.x = parseFloat(val);
+          else if (code === 20) v.y = parseFloat(val);
+          else if (code === 30) v.z = parseFloat(val);
+          else if (code === 42) v.bulge = parseFloat(val);
+          i++;
+        }
+        ent.vertices.push(v);
+      } else {
+        i++;
+      }
+    }
+    return { entity: ent, nextIndex: i };
+  }
+
+  if (type === 'SPLINE') {
+    ent.degree = 3;
+    ent.knots = [];
+    ent.controlPoints = [];
+    ent.weights = [];
+    let curPt = null;
+    while (i < pairs.length && pairs[i].code !== 0) {
+      const { code, val } = pairs[i];
+      if (code === 67) ent.paperSpace = parseInt(val, 10);
+      else if (code === 71) ent.degree = parseInt(val, 10);
+      else if (code === 40) ent.knots.push(parseFloat(val));
+      else if (code === 41) ent.weights.push(parseFloat(val));
+      else if (code === 10) {
+        if (curPt) ent.controlPoints.push(curPt);
+        curPt = { x: parseFloat(val), y: 0, z: 0 };
+      } else if (code === 20 && curPt) curPt.y = parseFloat(val);
+      else if (code === 30 && curPt) curPt.z = parseFloat(val);
+      i++;
+    }
+    if (curPt) ent.controlPoints.push(curPt);
+    return { entity: ent, nextIndex: i };
+  }
+
+  while (i < pairs.length && pairs[i].code !== 0) {
+    const { code, val } = pairs[i];
+    if (code === 67) ent.paperSpace = parseInt(val, 10);
+    else if (code === 2) ent.name = val;
+    else if (code === 10) ent.x1 = parseFloat(val);
+    else if (code === 20) ent.y1 = parseFloat(val);
+    else if (code === 30) ent.z1 = parseFloat(val);
+    else if (code === 11) ent.x2 = parseFloat(val);
+    else if (code === 21) ent.y2 = parseFloat(val);
+    else if (code === 31) ent.z2 = parseFloat(val);
+    else if (code === 40) ent.r = parseFloat(val);
+    else if (code === 41) ent.p1 = parseFloat(val);
+    else if (code === 42) ent.p2 = parseFloat(val);
+    else if (code === 43) ent.p3 = parseFloat(val);
+    else if (code === 50) ent.a1 = parseFloat(val);
+    else if (code === 51) ent.a2 = parseFloat(val);
+    i++;
+  }
+
+  return { entity: ent, nextIndex: i };
+}
+
+function computeEntitiesLength(entities, blocks, transform, ignorePaperSpace, stats) {
+  let sum = 0;
+  const avgScale = (Math.abs(transform.sx) + Math.abs(transform.sy)) / 2;
+
+  for (const e of entities) {
+    if (ignorePaperSpace && e.paperSpace === 1) continue;
+
+    if (['TEXT', 'MTEXT', 'POINT', 'ATTDEF', 'ATTRIB', 'VIEWPORT', 'DIMENSION', 'LEADER'].includes(e.type)) {
+      continue;
+    }
+
+    if (e.type === 'INSERT') {
+      const blk = blocks[e.name];
+      if (blk) {
+        const nextTransform = {
+          sx: transform.sx * (e.p1 !== undefined ? e.p1 : 1),
+          sy: transform.sy * (e.p2 !== undefined ? e.p2 : 1),
+          sz: transform.sz * (e.p3 !== undefined ? e.p3 : 1),
+          rot: transform.rot + (e.a1 || 0)
+        };
+        sum += computeEntitiesLength(blk, blocks, nextTransform, ignorePaperSpace, stats);
+      }
+      continue;
+    }
+
+    let len = 0;
+    let supported = true;
+
+    switch (e.type) {
+      case 'LINE': {
+        const dx = ((e.x2 || 0) - (e.x1 || 0)) * transform.sx;
+        const dy = ((e.y2 || 0) - (e.y1 || 0)) * transform.sy;
+        const dz = ((e.z2 || 0) - (e.z1 || 0)) * transform.sz;
+        len = Math.hypot(dx, dy, dz);
+        break;
+      }
+      case 'CIRCLE': {
+        len = 2 * Math.PI * (e.r || 0) * avgScale;
+        break;
+      }
+      case 'ARC': {
+        let a1 = e.a1 || 0;
+        let a2 = e.a2 || 0;
+        let diff = a2 - a1;
+        if (diff <= 0) diff += 360;
+        len = (diff / 360) * 2 * Math.PI * (e.r || 0) * avgScale;
+        break;
+      }
+      case 'LWPOLYLINE':
+      case 'POLYLINE': {
+        len = calcPolylineLength(e.vertices, e.closed, transform);
+        break;
+      }
+      case 'ELLIPSE': {
+        len = calcEllipseLength(e, transform);
+        break;
+      }
+      case 'SPLINE': {
+        len = calcSplineLength(e, transform);
+        break;
+      }
+      default: {
+        supported = false;
+        stats.warnings.add(`Skipped ${e.type}`);
+      }
+    }
+
+    if (supported) {
+      stats.count++;
+      sum += len;
+    }
+  }
+  return sum;
+}
+
+function calcPolylineLength(verts, closed, transform) {
+  if (!verts || verts.length < 2) return 0;
+  let total = 0;
+  const n = verts.length;
+  const segCount = closed ? n : n - 1;
+
+  for (let i = 0; i < segCount; i++) {
+    const v1 = verts[i];
+    const v2 = verts[(i + 1) % n];
+    const dx = (v2.x - v1.x) * transform.sx;
+    const dy = (v2.y - v1.y) * transform.sy;
+    const dz = ((v2.z || 0) - (v1.z || 0)) * transform.sz;
+    const chord = Math.hypot(dx, dy, dz);
+
+    if (!v1.bulge || Math.abs(v1.bulge) < 1e-9) {
+      total += chord;
+    } else {
+      const theta = 4 * Math.atan(Math.abs(v1.bulge));
+      const radius = chord / (2 * Math.sin(theta / 2));
+      total += radius * theta;
+    }
+  }
+  return total;
+}
+
+function calcEllipseLength(e, transform) {
+  const a = Math.hypot((e.x2 || 0) * transform.sx, (e.y2 || 0) * transform.sy);
+  const b = a * (e.r || 1);
+  let t1 = e.p1 !== undefined ? e.p1 : 0;
+  let t2 = e.p2 !== undefined ? e.p2 : 2 * Math.PI;
+  if (t2 <= t1) t2 += 2 * Math.PI;
+
+  const steps = 128;
+  const dt = (t2 - t1) / steps;
+  let len = 0;
+  let prevX = a * Math.cos(t1);
+  let prevY = b * Math.sin(t1);
+
+  for (let i = 1; i <= steps; i++) {
+    const t = t1 + i * dt;
+    const x = a * Math.cos(t);
+    const y = b * Math.sin(t);
+    len += Math.hypot(x - prevX, y - prevY);
+    prevX = x;
+    prevY = y;
+  }
+  return len;
+}
+
+function calcSplineLength(e, transform) {
+  const pts = e.controlPoints;
+  const knots = e.knots;
+  const p = e.degree || 3;
+  if (!pts || pts.length < 2) return 0;
+
+  if (!knots || knots.length < pts.length + p + 1) {
+    let fallback = 0;
+    for (let i = 0; i < pts.length - 1; i++) {
+      fallback += Math.hypot(
+        (pts[i+1].x - pts[i].x) * transform.sx,
+        (pts[i+1].y - pts[i].y) * transform.sy,
+        (pts[i+1].z - pts[i].z) * transform.sz
+      );
+    }
+    return fallback;
+  }
+
+  const tStart = knots[p];
+  const tEnd = knots[knots.length - 1 - p];
+  if (tEnd <= tStart) return 0;
+
+  const samples = Math.max(100, pts.length * 15);
+  let len = 0;
+  let prev = evalNurbs(tStart, p, pts, knots, e.weights);
+
+  for (let s = 1; s <= samples; s++) {
+    const t = tStart + (s / samples) * (tEnd - tStart);
+    const curr = evalNurbs(t, p, pts, knots, e.weights);
+    len += Math.hypot(
+      (curr.x - prev.x) * transform.sx,
+      (curr.y - prev.y) * transform.sy,
+      (curr.z - prev.z) * transform.sz
+    );
+    prev = curr;
+  }
+  return len;
+}
+
+function evalNurbs(t, degree, pts, knots, weights) {
+  const n = pts.length - 1;
+  if (t >= knots[n + 1]) t = knots[n + 1] - 1e-9;
+
+  let x = 0, y = 0, z = 0, wSum = 0;
+  for (let i = 0; i <= n; i++) {
+    const b = basisFunction(i, degree, t, knots);
+    if (b === 0) continue;
+    const w = (weights && weights[i] !== undefined) ? weights[i] : 1;
+    const bw = b * w;
+    x += pts[i].x * bw;
+    y += pts[i].y * bw;
+    z += pts[i].z * bw;
+    wSum += bw;
+  }
+  return wSum > 0 ? { x: x / wSum, y: y / wSum, z: z / wSum } : pts[0];
+}
+
+function basisFunction(i, p, t, knots) {
+  if (p === 0) {
+    return (t >= knots[i] && t < knots[i + 1]) ? 1 : 0;
+  }
+  let left = 0, right = 0;
+  const d1 = knots[i + p] - knots[i];
+  if (d1 > 0) left = ((t - knots[i]) / d1) * basisFunction(i, p - 1, t, knots);
+  const d2 = knots[i + p + 1] - knots[i + 1];
+  if (d2 > 0) right = ((knots[i + p + 1] - t) / d2) * basisFunction(i + 1, p - 1, t, knots);
+  return left + right;
+}
+</script>
+</body>
+</html>
